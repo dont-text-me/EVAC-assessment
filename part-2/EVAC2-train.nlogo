@@ -1,17 +1,37 @@
 extensions [rnd]
 breed [sheep a-sheep]
 breed [dogs dog]
-
+globals [
+  current-generation
+  num-dog-actions
+  num-dog-states
+  chromosome-length
+]
 sheep-own [
   last-x
   last-y
   last-move ;; [0-4], 0, 1, 2, 3, 4 is staying put, north, east, south and west respectively
-  move-made-in-this-tick
+  move-made-in-this-tick ;; for tracking which action to take, if a higher-priority action resulted in a move, do not take any other actions
+  next-patch
 ]
+
+dogs-own [
+  pack-number
+  role-number
+  chromosome
+  next-patch
+  fitness
+  current-state
+]
+
 
 to setup
   clear-all
-
+  reset-ticks
+  set num-dog-actions 5
+  set num-dog-states 16
+  set current-generation 0
+  set chromosome-length (num-dog-actions * num-dog-states)
   ; setup the grass
   ask patches [
     set pcolor green
@@ -25,11 +45,36 @@ to setup
   ]
 
   set-default-shape dogs "wolf 2"
-  create-dogs n-dogs [  ; create the wolves, then initialize their variables
-    set color black
-    setxy random-xcor random-ycor
+
+  foreach range n-packs [ pack-num ->
+    let pack-center list random-xcor random-ycor
+    foreach range n-dogs-per-pack [ role-num ->
+      create-dogs 1 [
+        set pack-number pack-num
+        set role-number role-num
+        set color item pack-num remove green base-colors
+        setxy item 0 pack-center item 1 pack-center
+
+        if current-generation = 0 [
+          setup-chromosomes
+        ]
+      ]
+    ]
   ]
+
   reset-ticks
+end
+
+to-report random-state
+  report list (random num-dog-actions) (random num-dog-states)
+end
+
+to setup-chromosomes
+  let states-blank n-values chromosome-length [random-state]
+
+  set chromosome states-blank
+
+  set current-state random num-dog-states
 end
 
 to-report herd-score
@@ -43,16 +88,61 @@ to-report herd-score
 end
 
 to go
-  ask sheep [tick-sheep]
-  ask dogs [tick-dogs]
+  if ticks < ticks-per-generation [
+  ask sheep [tick-sheep] ;; plan move according to assessment brief
+  ask dogs [tick-dogs] ;; plan move
+  ask turtles [move-to next-patch] ;; execute move
   tick
+  ]
+  if ticks = ticks-per-generation [
+    end-of-cycle
+    reset-ticks
+  ]
 end
 
-to tick-dogs
-  set heading one-of [0 90 180 270]
-  fd 1
-  set heading 0
+to end-of-cycle
+  set current-generation current-generation + 1
+  show current-generation
 end
+
+
+to tick-dogs
+  let whats-around look-around
+
+  ;;pair-value for what is infront of you and what state you are in
+  ;; gets correct point in the chromosome list
+  let state item ((whats-around * num-dog-states) + currentState) chromosome
+
+  let move (item 0 state)
+  let newState (item 1 state)
+
+  ifelse move = 0 [ moveFwd ]
+[ ifelse move = 1 [ moveBkwd ]
+[ ifelse move = 2 [ rotateLeft ]
+[ ifelse move = 3 [ rotateRight]
+[ ;; default case
+  ]]]]
+
+  set currentState newState
+end
+
+to-report look-around
+  report random num-dog-states
+end
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;Dog code (genetic algorithm);;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;; Sheep code ;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
 to tick-sheep
@@ -74,17 +164,11 @@ to tick-sheep
   ]
 end
 
-to sheep-action-1
-  ifelse count dogs-here = 1 [
-    let acceptable-patches neighbors4 with [count dogs-here = 0]
-    ifelse count acceptable-patches = 0 [
-      set move-made-in-this-tick false ;; no neighboring patches without a dog found
-    ]
-    [
-    ;; about to move: record the current position if action 5 is chosen on the next tick
+to move-and-update-last [candidate-patches]
+  ;; about to move: record the previous position to be used if this sheep ever needs to execute action 5
     set last-x xcor
     set last-y ycor
-    move-to one-of acceptable-patches ;; move to a neighboring patch without a dog
+    set next-patch one-of candidate-patches ;; if several patches match the conditions, pick randomly
     set move-made-in-this-tick true
       if last-x = xcor and last-y > ycor [ ;; moved north
         set last-move 1
@@ -98,6 +182,17 @@ to sheep-action-1
       if last-x = xcor and last-y < ycor [ ;; moved west
         set last-move 4
       ]
+
+end
+
+to sheep-action-1
+  ifelse count dogs-here = 1 [
+    let acceptable-patches neighbors4 with [count dogs-here = 0]
+    ifelse count acceptable-patches = 0 [
+      set move-made-in-this-tick false ;; no neighboring patches without a dog found
+    ]
+    [
+      move-and-update-last acceptable-patches
     ]
   ]
   [
@@ -112,23 +207,7 @@ to sheep-action-2
     set move-made-in-this-tick false ;; no neighboring patches without a dog found
   ]
   [
-    ;; about to move: record the current position if action 5 is chosen on the next tick
-    set last-x xcor
-    set last-y ycor
-    move-to one-of acceptable-patches ;; move to a neighboring patch without a dog
-    set move-made-in-this-tick true
-      if last-x = xcor and last-y > ycor [ ;; moved north
-        set last-move 1
-      ]
-      if last-x > xcor and last-y = ycor [ ;; moved east
-        set last-move 2
-      ]
-      if last-x = xcor and last-y < ycor [ ;; moved south
-        set last-move 3
-      ]
-      if last-x = xcor and last-y < ycor [ ;; moved west
-        set last-move 4
-      ]
+    move-and-update-last acceptable-patches
   ]
   ]
   [
@@ -137,28 +216,13 @@ to sheep-action-2
 end
 
 to sheep-action-3
-  let acceptable-patches neighbors4 with [count neighbors4 with [count sheep-here >= 1] >= 1]
+  let current patch-here
+  let acceptable-patches neighbors4 with [count neighbors4 with [count sheep-here >= 1 and self != current ] >= 1]
   ifelse count acceptable-patches = 0 [
     set move-made-in-this-tick false ;; no neighboring patches who themselves neighbor a patch with sheep found
   ]
   [
-    ;; about to move: record the current position if action 5 is chosen on the next tick
-    set last-x xcor
-    set last-y ycor
-    move-to one-of acceptable-patches ;; move to a neighboring patch without a dog
-    set move-made-in-this-tick true
-      if last-x = xcor and last-y > ycor [ ;; moved north
-        set last-move 1
-      ]
-      if last-x > xcor and last-y = ycor [ ;; moved east
-        set last-move 2
-      ]
-      if last-x = xcor and last-y < ycor [ ;; moved south
-        set last-move 3
-      ]
-      if last-x = xcor and last-y < ycor [ ;; moved west
-        set last-move 4
-      ]
+    move-and-update-last acceptable-patches
   ]
 end
 
@@ -168,27 +232,12 @@ to sheep-action-4
     set move-made-in-this-tick false ;; no neighboring patches with less sheep than here found
   ]
   [
-    ;; about to move: record the current position if action 5 is chosen on the next tick
-    set last-x xcor
-    set last-y ycor
-    move-to one-of acceptable-patches ;; move to a neighboring patch without a dog
-    set move-made-in-this-tick true
-      if last-x = xcor and last-y > ycor [ ;; moved north
-        set last-move 1
-      ]
-      if last-x > xcor and last-y = ycor [ ;; moved east
-        set last-move 2
-      ]
-      if last-x = xcor and last-y < ycor [ ;; moved south
-        set last-move 3
-      ]
-      if last-x = xcor and last-y < ycor [ ;; moved west
-        set last-move 4
-      ]
+    move-and-update-last acceptable-patches
   ]
 end
 
 to sheep-action-5
+  ;; Note that it's not necessary to track the move-made-in-this-tick variable here
   ;; choose the next action - same as last one with a chance of 0.5 and a different one with a chance of 0.125
   let next-move rnd:weighted-one-of-list [0 1 2 3 4 5] [it -> ifelse-value it = last-move [0.5] [0.125]]
   if next-move != 0 [
@@ -200,13 +249,13 @@ to sheep-action-5
 end
 @#$#@#$#@
 GRAPHICS-WINDOW
-235
+200
 10
-778
-554
+904
+715
 -1
 -1
-10.92
+14.2041
 1
 13
 1
@@ -227,10 +276,10 @@ ticks
 30.0
 
 BUTTON
+5
+15
 60
-40
-115
-73
+48
 NIL
 setup
 NIL
@@ -244,10 +293,10 @@ NIL
 1
 
 BUTTON
+76
+15
 131
-40
-186
-73
+48
 NIL
 go
 T
@@ -261,10 +310,10 @@ NIL
 1
 
 BUTTON
+76
+15
 131
-40
-186
-73
+48
 NIL
 go
 T
@@ -278,12 +327,12 @@ NIL
 0
 
 SLIDER
-20
-115
-192
-148
-n-dogs
-n-dogs
+5
+185
+177
+218
+n-dogs-per-pack
+n-dogs-per-pack
 0
 50
 5.0
@@ -293,10 +342,10 @@ NIL
 HORIZONTAL
 
 SLIDER
-20
-165
-192
-198
+5
+235
+177
+268
 n-sheep
 n-sheep
 0
@@ -308,10 +357,10 @@ NIL
 HORIZONTAL
 
 MONITOR
-25
-225
-142
-270
+0
+435
+117
+480
 Sheep herd score
 herd-score
 3
@@ -319,10 +368,10 @@ herd-score
 11
 
 PLOT
-10
-290
-210
-440
+0
+280
+200
+430
 Herd score
 NIL
 NIL
@@ -335,6 +384,47 @@ false
 "" ""
 PENS
 "default" 1.0 0 -16777216 true "" "plot herd-score"
+
+MONITOR
+5
+75
+137
+120
+Current generation
+current-generation
+1
+1
+11
+
+SLIDER
+5
+135
+202
+168
+ticks-per-generation
+ticks-per-generation
+0
+10000
+1099.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+0
+485
+172
+518
+n-packs
+n-packs
+0
+10
+5.0
+1
+1
+NIL
+HORIZONTAL
 
 @#$#@#$#@
 ## WHAT IS IT?
